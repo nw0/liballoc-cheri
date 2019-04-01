@@ -145,11 +145,11 @@ mod boxed {
 }
 #[cfg(test)]
 mod boxed_test;
-// pub mod collections;
+pub mod collections;
 // #[cfg(all(target_has_atomic = "ptr", target_has_atomic = "cas"))]
 // pub mod sync;
 // pub mod rc;
-// pub mod raw_vec;
+pub mod raw_vec;
 // pub mod prelude;
 // pub mod borrow;
 // pub mod fmt;
