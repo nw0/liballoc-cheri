@@ -156,7 +156,7 @@ pub mod raw_vec;
 // pub mod slice;
 // pub mod str;
 // pub mod string;
-// pub mod vec;
+pub mod vec;
 
 #[cfg(not(test))]
 mod std {
