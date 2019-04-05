@@ -53,9 +53,12 @@ use core::iter::{FromIterator, FusedIterator};
 use core::ops::{self, Add, AddAssign, Index, IndexMut, RangeBounds};
 use core::ops::Bound::{Excluded, Included, Unbounded};
 use core::ptr;
-use core::str::{self, pattern::Pattern, lossy};
+use core::str::{pattern::Pattern, lossy};
 
+use crate::borrow::{Cow, ToOwned};
+use crate::collections::CollectionAllocErr;
 use crate::boxed::Box;
+use crate::str::{self, from_boxed_utf8_unchecked, FromStr, Utf8Error, Chars};
 use crate::vec::Vec;
 
 /// A UTF-8 encoded, growable string.
@@ -281,6 +284,48 @@ pub struct String {
     vec: Vec<u8>,
 }
 
+/// A possible error value when converting a `String` from a UTF-8 byte vector.
+///
+/// This type is the error type for the [`from_utf8`] method on [`String`]. It
+/// is designed in such a way to carefully avoid reallocations: the
+/// [`into_bytes`] method will give back the byte vector that was used in the
+/// conversion attempt.
+///
+/// [`from_utf8`]: struct.String.html#method.from_utf8
+/// [`String`]: struct.String.html
+/// [`into_bytes`]: struct.FromUtf8Error.html#method.into_bytes
+///
+/// The [`Utf8Error`] type provided by [`std::str`] represents an error that may
+/// occur when converting a slice of [`u8`]s to a [`&str`]. In this sense, it's
+/// an analogue to `FromUtf8Error`, and you can get one from a `FromUtf8Error`
+/// through the [`utf8_error`] method.
+///
+/// [`Utf8Error`]: ../../std/str/struct.Utf8Error.html
+/// [`std::str`]: ../../std/str/index.html
+/// [`u8`]: ../../std/primitive.u8.html
+/// [`&str`]: ../../std/primitive.str.html
+/// [`utf8_error`]: #method.utf8_error
+///
+/// # Examples
+///
+/// Basic usage:
+///
+/// ```
+/// // some invalid bytes, in a vector
+/// let bytes = vec![0, 159];
+///
+/// let value = String::from_utf8(bytes);
+///
+/// assert!(value.is_err());
+/// assert_eq!(vec![0, 159], value.unwrap_err().into_bytes());
+/// ```
+#[stable(feature = "rust1", since = "1.0.0")]
+#[derive(Debug)]
+pub struct FromUtf8Error {
+    bytes: Vec<u8>,
+    error: Utf8Error,
+}
+
 /// A possible error value when converting a `String` from a UTF-16 byte slice.
 ///
 /// This type is the error type for the [`from_utf16`] method on [`String`].
@@ -380,6 +425,163 @@ impl String {
     #[cfg(test)]
     pub fn from_str(_: &str) -> String {
         panic!("not available with cfg(test)");
+    }
+
+    /// Converts a vector of bytes to a `String`.
+    ///
+    /// A string slice ([`&str`]) is made of bytes ([`u8`]), and a vector of bytes
+    /// ([`Vec<u8>`]) is made of bytes, so this function converts between the
+    /// two. Not all byte slices are valid `String`s, however: `String`
+    /// requires that it is valid UTF-8. `from_utf8()` checks to ensure that
+    /// the bytes are valid UTF-8, and then does the conversion.
+    ///
+    /// If you are sure that the byte slice is valid UTF-8, and you don't want
+    /// to incur the overhead of the validity check, there is an unsafe version
+    /// of this function, [`from_utf8_unchecked`], which has the same behavior
+    /// but skips the check.
+    ///
+    /// This method will take care to not copy the vector, for efficiency's
+    /// sake.
+    ///
+    /// If you need a [`&str`] instead of a `String`, consider
+    /// [`str::from_utf8`].
+    ///
+    /// The inverse of this method is [`as_bytes`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Err`] if the slice is not UTF-8 with a description as to why the
+    /// provided bytes are not UTF-8. The vector you moved in is also included.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// // some bytes, in a vector
+    /// let sparkle_heart = vec![240, 159, 146, 150];
+    ///
+    /// // We know these bytes are valid, so we'll use `unwrap()`.
+    /// let sparkle_heart = String::from_utf8(sparkle_heart).unwrap();
+    ///
+    /// assert_eq!("💖", sparkle_heart);
+    /// ```
+    ///
+    /// Incorrect bytes:
+    ///
+    /// ```
+    /// // some invalid bytes, in a vector
+    /// let sparkle_heart = vec![0, 159, 146, 150];
+    ///
+    /// assert!(String::from_utf8(sparkle_heart).is_err());
+    /// ```
+    ///
+    /// See the docs for [`FromUtf8Error`] for more details on what you can do
+    /// with this error.
+    ///
+    /// [`from_utf8_unchecked`]: struct.String.html#method.from_utf8_unchecked
+    /// [`&str`]: ../../std/primitive.str.html
+    /// [`u8`]: ../../std/primitive.u8.html
+    /// [`Vec<u8>`]: ../../std/vec/struct.Vec.html
+    /// [`str::from_utf8`]: ../../std/str/fn.from_utf8.html
+    /// [`as_bytes`]: struct.String.html#method.as_bytes
+    /// [`FromUtf8Error`]: struct.FromUtf8Error.html
+    /// [`Err`]: ../../std/result/enum.Result.html#variant.Err
+    #[inline]
+    #[stable(feature = "rust1", since = "1.0.0")]
+    pub fn from_utf8(vec: Vec<u8>) -> Result<String, FromUtf8Error> {
+        match str::from_utf8(&vec) {
+            Ok(..) => Ok(String { vec }),
+            Err(e) => {
+                Err(FromUtf8Error {
+                    bytes: vec,
+                    error: e,
+                })
+            }
+        }
+    }
+
+    /// Converts a slice of bytes to a string, including invalid characters.
+    ///
+    /// Strings are made of bytes ([`u8`]), and a slice of bytes
+    /// ([`&[u8]`][byteslice]) is made of bytes, so this function converts
+    /// between the two. Not all byte slices are valid strings, however: strings
+    /// are required to be valid UTF-8. During this conversion,
+    /// `from_utf8_lossy()` will replace any invalid UTF-8 sequences with
+    /// [`U+FFFD REPLACEMENT CHARACTER`][U+FFFD], which looks like this: �
+    ///
+    /// [`u8`]: ../../std/primitive.u8.html
+    /// [byteslice]: ../../std/primitive.slice.html
+    /// [U+FFFD]: ../char/constant.REPLACEMENT_CHARACTER.html
+    ///
+    /// If you are sure that the byte slice is valid UTF-8, and you don't want
+    /// to incur the overhead of the conversion, there is an unsafe version
+    /// of this function, [`from_utf8_unchecked`], which has the same behavior
+    /// but skips the checks.
+    ///
+    /// [`from_utf8_unchecked`]: struct.String.html#method.from_utf8_unchecked
+    ///
+    /// This function returns a [`Cow<'a, str>`]. If our byte slice is invalid
+    /// UTF-8, then we need to insert the replacement characters, which will
+    /// change the size of the string, and hence, require a `String`. But if
+    /// it's already valid UTF-8, we don't need a new allocation. This return
+    /// type allows us to handle both cases.
+    ///
+    /// [`Cow<'a, str>`]: ../../std/borrow/enum.Cow.html
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// // some bytes, in a vector
+    /// let sparkle_heart = vec![240, 159, 146, 150];
+    ///
+    /// let sparkle_heart = String::from_utf8_lossy(&sparkle_heart);
+    ///
+    /// assert_eq!("💖", sparkle_heart);
+    /// ```
+    ///
+    /// Incorrect bytes:
+    ///
+    /// ```
+    /// // some invalid bytes
+    /// let input = b"Hello \xF0\x90\x80World";
+    /// let output = String::from_utf8_lossy(input);
+    ///
+    /// assert_eq!("Hello �World", output);
+    /// ```
+    #[stable(feature = "rust1", since = "1.0.0")]
+    pub fn from_utf8_lossy<'a>(v: &'a [u8]) -> Cow<'a, str> {
+        let mut iter = lossy::Utf8Lossy::from_bytes(v).chunks();
+
+        let (first_valid, first_broken) = if let Some(chunk) = iter.next() {
+            let lossy::Utf8LossyChunk { valid, broken } = chunk;
+            if valid.len() == v.len() {
+                debug_assert!(broken.is_empty());
+                return Cow::Borrowed(valid);
+            }
+            (valid, broken)
+        } else {
+            return Cow::Borrowed("");
+        };
+
+        const REPLACEMENT: &str = "\u{FFFD}";
+
+        let mut res = String::with_capacity(v.len());
+        res.push_str(first_valid);
+        if !first_broken.is_empty() {
+            res.push_str(REPLACEMENT);
+        }
+
+        for lossy::Utf8LossyChunk { valid, broken } in iter {
+            res.push_str(valid);
+            if !broken.is_empty() {
+                res.push_str(REPLACEMENT);
+            }
+        }
+
+        Cow::Owned(res)
     }
 
     /// Decode a UTF-16 encoded vector `v` into a `String`, returning [`Err`]
@@ -718,6 +920,79 @@ impl String {
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn reserve_exact(&mut self, additional: usize) {
         self.vec.reserve_exact(additional)
+    }
+
+    /// Tries to reserve capacity for at least `additional` more elements to be inserted
+    /// in the given `String`. The collection may reserve more space to avoid
+    /// frequent reallocations. After calling `reserve`, capacity will be
+    /// greater than or equal to `self.len() + additional`. Does nothing if
+    /// capacity is already sufficient.
+    ///
+    /// # Errors
+    ///
+    /// If the capacity overflows, or the allocator reports a failure, then an error
+    /// is returned.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(try_reserve)]
+    /// use std::collections::CollectionAllocErr;
+    ///
+    /// fn process_data(data: &str) -> Result<String, CollectionAllocErr> {
+    ///     let mut output = String::new();
+    ///
+    ///     // Pre-reserve the memory, exiting if we can't
+    ///     output.try_reserve(data.len())?;
+    ///
+    ///     // Now we know this can't OOM in the middle of our complex work
+    ///     output.push_str(data);
+    ///
+    ///     Ok(output)
+    /// }
+    /// # process_data("rust").expect("why is the test harness OOMing on 4 bytes?");
+    /// ```
+    #[unstable(feature = "try_reserve", reason = "new API", issue="48043")]
+    pub fn try_reserve(&mut self, additional: usize) -> Result<(), CollectionAllocErr> {
+        self.vec.try_reserve(additional)
+    }
+
+    /// Tries to reserves the minimum capacity for exactly `additional` more elements to
+    /// be inserted in the given `String`. After calling `reserve_exact`,
+    /// capacity will be greater than or equal to `self.len() + additional`.
+    /// Does nothing if the capacity is already sufficient.
+    ///
+    /// Note that the allocator may give the collection more space than it
+    /// requests. Therefore, capacity can not be relied upon to be precisely
+    /// minimal. Prefer `reserve` if future insertions are expected.
+    ///
+    /// # Errors
+    ///
+    /// If the capacity overflows, or the allocator reports a failure, then an error
+    /// is returned.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(try_reserve)]
+    /// use std::collections::CollectionAllocErr;
+    ///
+    /// fn process_data(data: &str) -> Result<String, CollectionAllocErr> {
+    ///     let mut output = String::new();
+    ///
+    ///     // Pre-reserve the memory, exiting if we can't
+    ///     output.try_reserve(data.len())?;
+    ///
+    ///     // Now we know this can't OOM in the middle of our complex work
+    ///     output.push_str(data);
+    ///
+    ///     Ok(output)
+    /// }
+    /// # process_data("rust").expect("why is the test harness OOMing on 4 bytes?");
+    /// ```
+    #[unstable(feature = "try_reserve", reason = "new API", issue="48043")]
+    pub fn try_reserve_exact(&mut self, additional: usize) -> Result<(), CollectionAllocErr>  {
+        self.vec.try_reserve_exact(additional)
     }
 
     /// Shrinks the capacity of this `String` to match its length.
@@ -1176,6 +1451,72 @@ impl String {
         self.vec.clear()
     }
 
+    /// Creates a draining iterator that removes the specified range in the `String`
+    /// and yields the removed `chars`.
+    ///
+    /// Note: The element range is removed even if the iterator is not
+    /// consumed until the end.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the starting point or end point do not lie on a [`char`]
+    /// boundary, or if they're out of bounds.
+    ///
+    /// [`char`]: ../../std/primitive.char.html
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// let mut s = String::from("α is alpha, β is beta");
+    /// let beta_offset = s.find('β').unwrap_or(s.len());
+    ///
+    /// // Remove the range up until the β from the string
+    /// let t: String = s.drain(..beta_offset).collect();
+    /// assert_eq!(t, "α is alpha, ");
+    /// assert_eq!(s, "β is beta");
+    ///
+    /// // A full range clears the string
+    /// s.drain(..);
+    /// assert_eq!(s, "");
+    /// ```
+    #[stable(feature = "drain", since = "1.6.0")]
+    pub fn drain<R>(&mut self, range: R) -> Drain<'_>
+        where R: RangeBounds<usize>
+    {
+        // Memory safety
+        //
+        // The String version of Drain does not have the memory safety issues
+        // of the vector version. The data is just plain bytes.
+        // Because the range removal happens in Drop, if the Drain iterator is leaked,
+        // the removal will not happen.
+        let len = self.len();
+        let start = match range.start_bound() {
+            Included(&n) => n,
+            Excluded(&n) => n + 1,
+            Unbounded => 0,
+        };
+        let end = match range.end_bound() {
+            Included(&n) => n + 1,
+            Excluded(&n) => n,
+            Unbounded => len,
+        };
+
+        // Take out two simultaneous borrows. The &mut String won't be accessed
+        // until iteration is over, in Drop.
+        let self_ptr = self as *mut _;
+        // slicing does the appropriate bounds checks
+        let chars_iter = self[start..end].chars();
+
+        Drain {
+            start,
+            end,
+            iter: chars_iter,
+            string: self_ptr,
+        }
+    }
+
     /// Removes the specified range in the string,
     /// and replaces it with the given string.
     /// The given string doesn't need to be the same length as the range.
@@ -1224,12 +1565,127 @@ impl String {
             self.as_mut_vec()
         }.splice(range, replace_with.bytes());
     }
+
+    /// Converts this `String` into a [`Box`]`<`[`str`]`>`.
+    ///
+    /// This will drop any excess capacity.
+    ///
+    /// [`Box`]: ../../std/boxed/struct.Box.html
+    /// [`str`]: ../../std/primitive.str.html
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// let s = String::from("hello");
+    ///
+    /// let b = s.into_boxed_str();
+    /// ```
+    #[stable(feature = "box_str", since = "1.4.0")]
+    #[inline]
+    pub fn into_boxed_str(self) -> Box<str> {
+        let slice = self.vec.into_boxed_slice();
+        unsafe { from_boxed_utf8_unchecked(slice) }
+    }
+}
+
+impl FromUtf8Error {
+    /// Returns a slice of [`u8`]s bytes that were attempted to convert to a `String`.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// // some invalid bytes, in a vector
+    /// let bytes = vec![0, 159];
+    ///
+    /// let value = String::from_utf8(bytes);
+    ///
+    /// assert_eq!(&[0, 159], value.unwrap_err().as_bytes());
+    /// ```
+    #[stable(feature = "from_utf8_error_as_bytes", since = "1.26.0")]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..]
+    }
+
+    /// Returns the bytes that were attempted to convert to a `String`.
+    ///
+    /// This method is carefully constructed to avoid allocation. It will
+    /// consume the error, moving out the bytes, so that a copy of the bytes
+    /// does not need to be made.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// // some invalid bytes, in a vector
+    /// let bytes = vec![0, 159];
+    ///
+    /// let value = String::from_utf8(bytes);
+    ///
+    /// assert_eq!(vec![0, 159], value.unwrap_err().into_bytes());
+    /// ```
+    #[stable(feature = "rust1", since = "1.0.0")]
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+
+    /// Fetch a `Utf8Error` to get more details about the conversion failure.
+    ///
+    /// The [`Utf8Error`] type provided by [`std::str`] represents an error that may
+    /// occur when converting a slice of [`u8`]s to a [`&str`]. In this sense, it's
+    /// an analogue to `FromUtf8Error`. See its documentation for more details
+    /// on using it.
+    ///
+    /// [`Utf8Error`]: ../../std/str/struct.Utf8Error.html
+    /// [`std::str`]: ../../std/str/index.html
+    /// [`u8`]: ../../std/primitive.u8.html
+    /// [`&str`]: ../../std/primitive.str.html
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// // some invalid bytes, in a vector
+    /// let bytes = vec![0, 159];
+    ///
+    /// let error = String::from_utf8(bytes).unwrap_err().utf8_error();
+    ///
+    /// // the first byte is invalid here
+    /// assert_eq!(1, error.valid_up_to());
+    /// ```
+    #[stable(feature = "rust1", since = "1.0.0")]
+    pub fn utf8_error(&self) -> Utf8Error {
+        self.error
+    }
+}
+
+#[stable(feature = "rust1", since = "1.0.0")]
+impl fmt::Display for FromUtf8Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.error, f)
+    }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl fmt::Display for FromUtf16Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt("invalid utf-16: lone surrogate found", f)
+    }
+}
+
+#[stable(feature = "rust1", since = "1.0.0")]
+impl Clone for String {
+    fn clone(&self) -> Self {
+        String { vec: self.vec.clone() }
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        self.vec.clone_from(&source.vec);
     }
 }
 
@@ -1278,6 +1734,25 @@ impl FromIterator<String> for String {
     }
 }
 
+#[stable(feature = "herd_cows", since = "1.19.0")]
+impl<'a> FromIterator<Cow<'a, str>> for String {
+    fn from_iter<I: IntoIterator<Item = Cow<'a, str>>>(iter: I) -> String {
+        let mut iterator = iter.into_iter();
+
+        // Because we're iterating over CoWs, we can (potentially) avoid at least
+        // one allocation by getting the first item and appending to it all the
+        // subsequent items.
+        match iterator.next() {
+            None => String::new(),
+            Some(cow) => {
+                let mut buf = cow.into_owned();
+                buf.extend(iterator);
+                buf
+            }
+        }
+    }
+}
+
 #[stable(feature = "rust1", since = "1.0.0")]
 impl Extend<char> for String {
     fn extend<I: IntoIterator<Item = char>>(&mut self, iter: I) {
@@ -1305,6 +1780,13 @@ impl<'a> Extend<&'a str> for String {
 #[stable(feature = "extend_string", since = "1.4.0")]
 impl Extend<String> for String {
     fn extend<I: IntoIterator<Item = String>>(&mut self, iter: I) {
+        iter.into_iter().for_each(move |s| self.push_str(&s));
+    }
+}
+
+#[stable(feature = "herd_cows", since = "1.19.0")]
+impl<'a> Extend<Cow<'a, str>> for String {
+    fn extend<I: IntoIterator<Item = Cow<'a, str>>>(&mut self, iter: I) {
         iter.into_iter().for_each(move |s| self.push_str(&s));
     }
 }
@@ -1366,6 +1848,9 @@ macro_rules! impl_eq {
 
 impl_eq! { String, str }
 impl_eq! { String, &'a str }
+impl_eq! { Cow<'a, str>, str }
+impl_eq! { Cow<'a, str>, &'b str }
+impl_eq! { Cow<'a, str>, String }
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl Default for String {
@@ -1590,6 +2075,15 @@ impl ops::DerefMut for String {
 #[stable(feature = "str_parse_error", since = "1.5.0")]
 pub type ParseError = core::convert::Infallible;
 
+#[stable(feature = "rust1", since = "1.0.0")]
+impl FromStr for String {
+    type Err = core::convert::Infallible;
+    #[inline]
+    fn from_str(s: &str) -> Result<String, ParseError> {
+        Ok(String::from(s))
+    }
+}
+
 
 /// A trait for converting a value to a `String`.
 ///
@@ -1637,6 +2131,30 @@ impl<T: fmt::Display + ?Sized> ToString for T {
     }
 }
 
+#[stable(feature = "str_to_string_specialization", since = "1.9.0")]
+impl ToString for str {
+    #[inline]
+    fn to_string(&self) -> String {
+        String::from(self)
+    }
+}
+
+#[stable(feature = "cow_str_to_string_specialization", since = "1.17.0")]
+impl ToString for Cow<'_, str> {
+    #[inline]
+    fn to_string(&self) -> String {
+        self[..].to_owned()
+    }
+}
+
+#[stable(feature = "string_to_string_specialization", since = "1.17.0")]
+impl ToString for String {
+    #[inline]
+    fn to_string(&self) -> String {
+        self.to_owned()
+    }
+}
+
 #[stable(feature = "rust1", since = "1.0.0")]
 impl AsRef<str> for String {
     #[inline]
@@ -1650,6 +2168,109 @@ impl AsRef<[u8]> for String {
     #[inline]
     fn as_ref(&self) -> &[u8] {
         self.as_bytes()
+    }
+}
+
+#[stable(feature = "rust1", since = "1.0.0")]
+impl From<&str> for String {
+    #[inline]
+    fn from(s: &str) -> String {
+        s.to_owned()
+    }
+}
+
+// note: test pulls in libstd, which causes errors here
+#[cfg(not(test))]
+#[stable(feature = "string_from_box", since = "1.18.0")]
+impl From<Box<str>> for String {
+    /// Converts the given boxed `str` slice to a `String`.
+    /// It is notable that the `str` slice is owned.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// let s1: String = String::from("hello world");
+    /// let s2: Box<str> = s1.into_boxed_str();
+    /// let s3: String = String::from(s2);
+    ///
+    /// assert_eq!("hello world", s3)
+    /// ```
+    fn from(s: Box<str>) -> String {
+        s.into_string()
+    }
+}
+
+#[stable(feature = "box_from_str", since = "1.20.0")]
+impl From<String> for Box<str> {
+    /// Converts the given `String` to a boxed `str` slice that is owned.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// let s1: String = String::from("hello world");
+    /// let s2: Box<str> = Box::from(s1);
+    /// let s3: String = String::from(s2);
+    ///
+    /// assert_eq!("hello world", s3)
+    /// ```
+    fn from(s: String) -> Box<str> {
+        s.into_boxed_str()
+    }
+}
+
+#[stable(feature = "string_from_cow_str", since = "1.14.0")]
+impl<'a> From<Cow<'a, str>> for String {
+    fn from(s: Cow<'a, str>) -> String {
+        s.into_owned()
+    }
+}
+
+#[stable(feature = "rust1", since = "1.0.0")]
+impl<'a> From<&'a str> for Cow<'a, str> {
+    #[inline]
+    fn from(s: &'a str) -> Cow<'a, str> {
+        Cow::Borrowed(s)
+    }
+}
+
+#[stable(feature = "rust1", since = "1.0.0")]
+impl<'a> From<String> for Cow<'a, str> {
+    #[inline]
+    fn from(s: String) -> Cow<'a, str> {
+        Cow::Owned(s)
+    }
+}
+
+#[stable(feature = "cow_from_string_ref", since = "1.28.0")]
+impl<'a> From<&'a String> for Cow<'a, str> {
+    #[inline]
+    fn from(s: &'a String) -> Cow<'a, str> {
+        Cow::Borrowed(s.as_str())
+    }
+}
+
+#[stable(feature = "cow_str_from_iter", since = "1.12.0")]
+impl<'a> FromIterator<char> for Cow<'a, str> {
+    fn from_iter<I: IntoIterator<Item = char>>(it: I) -> Cow<'a, str> {
+        Cow::Owned(FromIterator::from_iter(it))
+    }
+}
+
+#[stable(feature = "cow_str_from_iter", since = "1.12.0")]
+impl<'a, 'b> FromIterator<&'b str> for Cow<'a, str> {
+    fn from_iter<I: IntoIterator<Item = &'b str>>(it: I) -> Cow<'a, str> {
+        Cow::Owned(FromIterator::from_iter(it))
+    }
+}
+
+#[stable(feature = "cow_str_from_iter", since = "1.12.0")]
+impl<'a> FromIterator<String> for Cow<'a, str> {
+    fn from_iter<I: IntoIterator<Item = String>>(it: I) -> Cow<'a, str> {
+        Cow::Owned(FromIterator::from_iter(it))
     }
 }
 
@@ -1688,3 +2309,73 @@ impl fmt::Write for String {
         Ok(())
     }
 }
+
+/// A draining iterator for `String`.
+///
+/// This struct is created by the [`drain`] method on [`String`]. See its
+/// documentation for more.
+///
+/// [`drain`]: struct.String.html#method.drain
+/// [`String`]: struct.String.html
+#[stable(feature = "drain", since = "1.6.0")]
+pub struct Drain<'a> {
+    /// Will be used as &'a mut String in the destructor
+    string: *mut String,
+    /// Start of part to remove
+    start: usize,
+    /// End of part to remove
+    end: usize,
+    /// Current remaining range to remove
+    iter: Chars<'a>,
+}
+
+#[stable(feature = "collection_debug", since = "1.17.0")]
+impl fmt::Debug for Drain<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad("Drain { .. }")
+    }
+}
+
+#[stable(feature = "drain", since = "1.6.0")]
+unsafe impl Sync for Drain<'_> {}
+#[stable(feature = "drain", since = "1.6.0")]
+unsafe impl Send for Drain<'_> {}
+
+#[stable(feature = "drain", since = "1.6.0")]
+impl Drop for Drain<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            // Use Vec::drain. "Reaffirm" the bounds checks to avoid
+            // panic code being inserted again.
+            let self_vec = (*self.string).as_mut_vec();
+            if self.start <= self.end && self.end <= self_vec.len() {
+                self_vec.drain(self.start..self.end);
+            }
+        }
+    }
+}
+
+#[stable(feature = "drain", since = "1.6.0")]
+impl Iterator for Drain<'_> {
+    type Item = char;
+
+    #[inline]
+    fn next(&mut self) -> Option<char> {
+        self.iter.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.iter.size_hint()
+    }
+}
+
+#[stable(feature = "drain", since = "1.6.0")]
+impl DoubleEndedIterator for Drain<'_> {
+    #[inline]
+    fn next_back(&mut self) -> Option<char> {
+        self.iter.next_back()
+    }
+}
+
+#[stable(feature = "fused", since = "1.26.0")]
+impl FusedIterator for Drain<'_> {}

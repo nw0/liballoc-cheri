@@ -207,6 +207,24 @@ impl ToOwned for str {
 #[lang = "str_alloc"]
 #[cfg(not(test))]
 impl str {
+    /// Converts a `Box<str>` into a `Box<[u8]>` without copying or allocating.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// let s = "this is a string";
+    /// let boxed_str = s.to_owned().into_boxed_str();
+    /// let boxed_bytes = boxed_str.into_boxed_bytes();
+    /// assert_eq!(*boxed_bytes, *s.as_bytes());
+    /// ```
+    #[stable(feature = "str_box_extras", since = "1.20.0")]
+    #[inline]
+    pub fn into_boxed_bytes(self: Box<str>) -> Box<[u8]> {
+        self.into()
+    }
+
     /// Replaces all matches of a pattern with another string.
     ///
     /// `replace` creates a new [`String`], and copies the data from this string slice into it.
@@ -421,6 +439,28 @@ impl str {
             }
         }
         return s;
+    }
+
+    /// Converts a [`Box<str>`] into a [`String`] without copying or allocating.
+    ///
+    /// [`String`]: string/struct.String.html
+    /// [`Box<str>`]: boxed/struct.Box.html
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// let string = String::from("birthday gift");
+    /// let boxed_str = string.clone().into_boxed_str();
+    ///
+    /// assert_eq!(boxed_str.into_string(), string);
+    /// ```
+    #[stable(feature = "box_str", since = "1.4.0")]
+    #[inline]
+    pub fn into_string(self: Box<str>) -> String {
+        let slice = Box::<[u8]>::from(self);
+        unsafe { String::from_utf8_unchecked(slice.into_vec()) }
     }
 
     /// Creates a new [`String`] by repeating a string `n` times.
