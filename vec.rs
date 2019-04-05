@@ -68,6 +68,7 @@ use core::ops::Bound::{Excluded, Included, Unbounded};
 use core::ptr::{self, NonNull};
 use core::slice::{self, SliceIndex};
 
+use crate::borrow::{ToOwned, Cow};
 use crate::collections::CollectionAllocErr;
 use crate::boxed::Box;
 use crate::raw_vec::RawVec;
@@ -1635,6 +1636,27 @@ unsafe impl<T: ?Sized> IsZero for *mut T {
 ////////////////////////////////////////////////////////////////////////////////
 
 #[stable(feature = "rust1", since = "1.0.0")]
+impl<T: Clone> Clone for Vec<T> {
+    #[cfg(not(test))]
+    fn clone(&self) -> Vec<T> {
+        <[T]>::to_vec(&**self)
+    }
+
+    // HACK(japaric): with cfg(test) the inherent `[T]::to_vec` method, which is
+    // required for this method definition, is not available. Instead use the
+    // `slice::to_vec`  function which is only available with cfg(test)
+    // NB see the slice::hack module in slice.rs for more information
+    #[cfg(test)]
+    fn clone(&self) -> Vec<T> {
+        crate::slice::to_vec(&**self)
+    }
+
+    fn clone_from(&mut self, other: &Vec<T>) {
+        other.as_slice().clone_into(self);
+    }
+}
+
+#[stable(feature = "rust1", since = "1.0.0")]
 impl<T: Hash> Hash for Vec<T> {
     #[inline]
     fn hash<H: hash::Hasher>(&self, state: &mut H) {
@@ -2059,6 +2081,9 @@ macro_rules! __impl_slice_eq1 {
 __impl_slice_eq1! { Vec<A>, Vec<B> }
 __impl_slice_eq1! { Vec<A>, &'b [B] }
 __impl_slice_eq1! { Vec<A>, &'b mut [B] }
+__impl_slice_eq1! { Cow<'a, [A]>, &'b [B], Clone }
+__impl_slice_eq1! { Cow<'a, [A]>, &'b mut [B], Clone }
+__impl_slice_eq1! { Cow<'a, [A]>, Vec<B>, Clone }
 
 macro_rules! array_impls {
     ($($N: expr)+) => {
@@ -2067,6 +2092,9 @@ macro_rules! array_impls {
             __impl_slice_eq1! { Vec<A>, [B; $N] }
             __impl_slice_eq1! { Vec<A>, &'b [B; $N] }
             // __impl_slice_eq1! { Vec<A>, &'b mut [B; $N] }
+            // __impl_slice_eq1! { Cow<'a, [A]>, [B; $N], Clone }
+            // __impl_slice_eq1! { Cow<'a, [A]>, &'b [B; $N], Clone }
+            // __impl_slice_eq1! { Cow<'a, [A]>, &'b mut [B; $N], Clone }
         )+
     }
 }
@@ -2153,6 +2181,46 @@ impl<T> AsMut<[T]> for Vec<T> {
     }
 }
 
+#[stable(feature = "rust1", since = "1.0.0")]
+impl<T: Clone> From<&[T]> for Vec<T> {
+    #[cfg(not(test))]
+    fn from(s: &[T]) -> Vec<T> {
+        s.to_vec()
+    }
+    #[cfg(test)]
+    fn from(s: &[T]) -> Vec<T> {
+        crate::slice::to_vec(s)
+    }
+}
+
+#[stable(feature = "vec_from_mut", since = "1.19.0")]
+impl<T: Clone> From<&mut [T]> for Vec<T> {
+    #[cfg(not(test))]
+    fn from(s: &mut [T]) -> Vec<T> {
+        s.to_vec()
+    }
+    #[cfg(test)]
+    fn from(s: &mut [T]) -> Vec<T> {
+        crate::slice::to_vec(s)
+    }
+}
+
+#[stable(feature = "vec_from_cow_slice", since = "1.14.0")]
+impl<'a, T> From<Cow<'a, [T]>> for Vec<T> where [T]: ToOwned<Owned=Vec<T>> {
+    fn from(s: Cow<'a, [T]>) -> Vec<T> {
+        s.into_owned()
+    }
+}
+
+// note: test pulls in libstd, which causes errors here
+#[cfg(not(test))]
+#[stable(feature = "vec_from_box", since = "1.18.0")]
+impl<T> From<Box<[T]>> for Vec<T> {
+    fn from(s: Box<[T]>) -> Vec<T> {
+        s.into_vec()
+    }
+}
+
 // note: test pulls in libstd, which causes errors here
 #[cfg(not(test))]
 #[stable(feature = "box_from_vec", since = "1.20.0")]
@@ -2162,9 +2230,44 @@ impl<T> From<Vec<T>> for Box<[T]> {
     }
 }
 
+#[stable(feature = "rust1", since = "1.0.0")]
+impl From<&str> for Vec<u8> {
+    fn from(s: &str) -> Vec<u8> {
+        From::from(s.as_bytes())
+    }
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Clone-on-write
 ////////////////////////////////////////////////////////////////////////////////
+
+#[stable(feature = "cow_from_vec", since = "1.8.0")]
+impl<'a, T: Clone> From<&'a [T]> for Cow<'a, [T]> {
+    fn from(s: &'a [T]) -> Cow<'a, [T]> {
+        Cow::Borrowed(s)
+    }
+}
+
+#[stable(feature = "cow_from_vec", since = "1.8.0")]
+impl<'a, T: Clone> From<Vec<T>> for Cow<'a, [T]> {
+    fn from(v: Vec<T>) -> Cow<'a, [T]> {
+        Cow::Owned(v)
+    }
+}
+
+#[stable(feature = "cow_from_vec_ref", since = "1.28.0")]
+impl<'a, T: Clone> From<&'a Vec<T>> for Cow<'a, [T]> {
+    fn from(v: &'a Vec<T>) -> Cow<'a, [T]> {
+        Cow::Borrowed(v.as_slice())
+    }
+}
+
+#[stable(feature = "rust1", since = "1.0.0")]
+impl<'a, T> FromIterator<T> for Cow<'a, [T]> where T: Clone {
+    fn from_iter<I: IntoIterator<Item = T>>(it: I) -> Cow<'a, [T]> {
+        Cow::Owned(FromIterator::from_iter(it))
+    }
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 // Iterators
@@ -2320,6 +2423,13 @@ impl<T> FusedIterator for IntoIter<T> {}
 
 #[unstable(feature = "trusted_len", issue = "37572")]
 unsafe impl<T> TrustedLen for IntoIter<T> {}
+
+#[stable(feature = "vec_into_iter_clone", since = "1.8.0")]
+impl<T: Clone> Clone for IntoIter<T> {
+    fn clone(&self) -> IntoIter<T> {
+        self.as_slice().to_owned().into_iter()
+    }
+}
 
 #[stable(feature = "rust1", since = "1.0.0")]
 unsafe impl<#[may_dangle] T> Drop for IntoIter<T> {
