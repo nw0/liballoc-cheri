@@ -152,10 +152,10 @@ pub mod collections;
 pub mod raw_vec;
 // pub mod prelude;
 // pub mod borrow;
-// pub mod fmt;
+pub mod fmt;
 // pub mod slice;
 // pub mod str;
-// pub mod string;
+pub mod string;
 pub mod vec;
 
 #[cfg(not(test))]
