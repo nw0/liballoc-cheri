@@ -150,7 +150,7 @@ pub mod collections;
 // pub mod sync;
 // pub mod rc;
 pub mod raw_vec;
-// pub mod prelude;
+pub mod prelude;
 pub mod borrow;
 pub mod fmt;
 pub mod slice;
