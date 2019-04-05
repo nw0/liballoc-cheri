@@ -2,6 +2,45 @@
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
+pub mod binary_heap;
+mod btree;
+pub mod linked_list;
+pub mod vec_deque;
+
+#[stable(feature = "rust1", since = "1.0.0")]
+pub mod btree_map {
+    //! A map based on a B-Tree.
+    #[stable(feature = "rust1", since = "1.0.0")]
+    pub use super::btree::map::*;
+}
+
+#[stable(feature = "rust1", since = "1.0.0")]
+pub mod btree_set {
+    //! A set based on a B-Tree.
+    #[stable(feature = "rust1", since = "1.0.0")]
+    pub use super::btree::set::*;
+}
+
+#[stable(feature = "rust1", since = "1.0.0")]
+#[doc(no_inline)]
+pub use binary_heap::BinaryHeap;
+
+#[stable(feature = "rust1", since = "1.0.0")]
+#[doc(no_inline)]
+pub use btree_map::BTreeMap;
+
+#[stable(feature = "rust1", since = "1.0.0")]
+#[doc(no_inline)]
+pub use btree_set::BTreeSet;
+
+#[stable(feature = "rust1", since = "1.0.0")]
+#[doc(no_inline)]
+pub use linked_list::LinkedList;
+
+#[stable(feature = "rust1", since = "1.0.0")]
+#[doc(no_inline)]
+pub use vec_deque::VecDeque;
+
 use crate::alloc::{AllocErr, LayoutErr};
 
 /// Augments `AllocErr` with a CapacityOverflow variant.
