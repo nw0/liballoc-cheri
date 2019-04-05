@@ -179,7 +179,7 @@ unsafe impl Alloc for Global {
 #[inline]
 unsafe fn exchange_malloc(size: usize, align: usize) -> *mut u8 {
     if size == 0 {
-        panic!("Tried to cast inttoptr")
+        align as *mut u8
     } else {
         let layout = Layout::from_size_align_unchecked(size, align);
         let ptr = alloc(layout);
