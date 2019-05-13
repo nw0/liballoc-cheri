@@ -594,7 +594,7 @@ impl<T: Clone, V: Borrow<[T]>> SliceConcatExt<T> for [V] {
         let mut iter = self.iter();
         let first = match iter.next() {
             Some(first) => first,
-            None => return Vec::new(),
+            None => return vec![],
         };
         let size = self.iter().map(|slice| slice.borrow().len()).sum::<usize>() + self.len() - 1;
         let mut result = Vec::with_capacity(size);
@@ -888,7 +888,7 @@ fn merge_sort<T, F>(v: &mut [T], mut is_less: F)
     // strange decision, but consider the fact that merges more often go in the opposite direction
     // (forwards). According to benchmarks, merging forwards is slightly faster than merging
     // backwards. To conclude, identifying runs by traversing backwards improves performance.
-    let mut runs = Vec::new();
+    let mut runs = vec![];
     let mut end = len;
     while end > 0 {
         // Find the next natural run, and reverse it if it's strictly descending.

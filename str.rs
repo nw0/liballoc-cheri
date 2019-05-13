@@ -146,7 +146,7 @@ where
     // the first slice is the only one without a separator preceding it
     let first = match iter.next() {
         Some(first) => first,
-        None => return Vec::new(),
+        None => return vec![],
     };
 
     // compute the exact total length of the joined Vec
